@@ -27,14 +27,22 @@ app.use((req, res, next) => {
   next();
 });
 
-// Setup API proxy without path rewriting
-console.log('Setting up API proxy middleware to ' + BACKEND_URL);
+// Configure proxy middleware with explicit path handling
 const apiProxy = createProxyMiddleware({
   target: BACKEND_URL,
   changeOrigin: true,
+  pathRewrite: {
+    '^/api': '', // remove /api prefix when forwarding to backend
+  },
   logLevel: 'debug',
   onProxyReq: (proxyReq, req, res) => {
-    console.log('Proxying request:', req.method, req.path, '->', proxyReq.path);
+    // Log the request details
+    console.log('Proxying request:', {
+      method: req.method,
+      originalPath: req.path,
+      targetPath: proxyReq.path,
+      headers: req.headers
+    });
   },
   onProxyRes: (proxyRes, req, res) => {
     // Add CORS headers to proxied responses
@@ -43,9 +51,8 @@ const apiProxy = createProxyMiddleware({
     proxyRes.headers['Access-Control-Allow-Methods'] = 'GET,HEAD,PUT,PATCH,POST,DELETE';
     proxyRes.headers['Access-Control-Allow-Headers'] = 'Origin, X-Requested-With, Content-Type, Accept, Authorization, user-id';
 
-    // Check if the response is 404 and the client expects JSON
+    // Handle 404 responses
     if (proxyRes.statusCode === 404 && req.headers.accept && req.headers.accept.includes('application/json')) {
-      // Collect the original response body
       let originalBody = '';
       const originalWrite = res.write;
       const originalEnd = res.end;
@@ -56,7 +63,6 @@ const apiProxy = createProxyMiddleware({
       };
       
       res.end = function() {
-        // If it looks like HTML and the client expected JSON, replace with JSON error
         if (originalBody.includes('<!DOCTYPE html>') || originalBody.includes('<html>')) {
           res.setHeader('Content-Type', 'application/json');
           const jsonResponse = JSON.stringify({ error: 'Endpoint not found', status: 404 });
@@ -70,7 +76,12 @@ const apiProxy = createProxyMiddleware({
   onError: (err, req, res) => {
     console.error('Proxy error:', err);
     res.writeHead(500, {'Content-Type': 'application/json'});
-    res.end(JSON.stringify({ error: 'Proxy error', message: err.message }));
+    res.end(JSON.stringify({ 
+      error: 'Proxy error', 
+      message: err.message,
+      path: req.path,
+      target: BACKEND_URL
+    }));
   }
 });
 
@@ -482,7 +493,7 @@ app.post('/api/reset-calendar-events', (req, res) => {
   });
 });
 
-// Use the proxy middleware for all other /api routes
+// Use the proxy middleware for /api routes
 app.use('/api', apiProxy);
 
 // Also handle direct requests to port 5001 with dummy data for compatibility
@@ -493,9 +504,14 @@ app.get('/dummy-api/notifications', (req, res) => {
 // Serve static files from the dist directory
 app.use(express.static(path.join(__dirname, 'dist')));
 
-// For any other request, send the index.html file
+// Handle all other routes by serving index.html
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
 
-app.listen(PORT, () => console.log(`Frontend server running on port ${PORT}`));
+// Start the server
+const server = http.createServer(app);
+server.listen(PORT, () => {
+  console.log(`Frontend server running on port ${PORT}`);
+  console.log(`Proxying API requests to ${BACKEND_URL}`);
+});

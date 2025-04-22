@@ -1,6 +1,23 @@
 ﻿#!/bin/sh
 set -e
-echo "Starting entrypoint script..."
+
+# Function to log messages with timestamp
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+}
+
+# Error handler
+handle_error() {
+    log "Error occurred in script at line $1"
+    exit 1
+}
+
+# Set up error handling
+trap 'handle_error $LINENO' ERR
+
+log "Starting entrypoint script..."
+
+# Set default environment variables
 DB_HOST=${DB_HOST:-"localhost"}
 DB_USER=${DB_USER:-"user"}
 DB_PASSWORD=${DB_PASSWORD:-"password"}
@@ -8,92 +25,118 @@ DB_NAME=${DB_NAME:-"hrportal"}
 FRONTEND_PORT=${FRONTEND_PORT:-"80"}
 BACKEND_PORT=${BACKEND_PORT:-"5002"}
 BACKEND_URL="http://localhost:${BACKEND_PORT}"
-echo "Setting FRONTEND_PORT to $FRONTEND_PORT"
-echo "Setting BACKEND_PORT to $BACKEND_PORT"
-echo "VITE_API_URL=/api" > /app/.env
-echo "VITE_BASE_URL=http://localhost:8080" >> /app/.env
-echo "DB_HOST=$DB_HOST" >> /app/.env
-echo "DB_USER=$DB_USER" >> /app/.env
-echo "DB_PASSWORD=$DB_PASSWORD" >> /app/.env
-echo "DB_NAME=$DB_NAME" >> /app/.env
-echo "FRONTEND_PORT=$FRONTEND_PORT" >> /app/.env
-echo "BACKEND_PORT=$BACKEND_PORT" >> /app/.env
-echo "BACKEND_URL=$BACKEND_URL" >> /app/.env
-cp /app/.env /app/server/.env
-echo "Created .env file and copied to server directory"
-echo "Directory contents:"
-ls -la /app
-if [ ! -f /app/server.js ]; then
-  echo "Creating server.js symlink..."
-  ln -s /app/server/server.js /app/server.js
-fi
 
-# Create symlinks for proxy modules
-echo "Setting up dependency symlinks for proxy server..."
-mkdir -p /app/node_modules
-ln -sf /app/proxy-modules/node_modules/express /app/node_modules/
-ln -sf /app/proxy-modules/node_modules/cors /app/node_modules/
-ln -sf /app/proxy-modules/node_modules/http-proxy-middleware /app/node_modules/
-ln -sf /app/proxy-modules/node_modules/node-fetch /app/node_modules/
-ln -sf /app/proxy-modules/node_modules/path /app/node_modules/
+log "Environment configuration:"
+log "FRONTEND_PORT: $FRONTEND_PORT"
+log "BACKEND_PORT: $BACKEND_PORT"
+log "BACKEND_URL: $BACKEND_URL"
+log "DB_HOST: $DB_HOST"
+log "DB_NAME: $DB_NAME"
 
-# Start the backend server with a different internal port (5002)
-echo "Starting backend server on port $BACKEND_PORT..."
-cd /app/server && PORT=$BACKEND_PORT node server.js &
-BACKEND_PID=$!
-
-# Allow a moment for the backend to start
-sleep 2
-
-# Start the frontend server
-echo "Starting frontend server on port $FRONTEND_PORT..."
-cd /app && BACKEND_URL=$BACKEND_URL NODE_PATH=/app/proxy-modules/node_modules node frontend-server.js &
-FRONTEND_PID=$!
-
-# Start socat to redirect port 5001 traffic to the frontend server
-echo "Setting up port redirection: port 5001 -> port 80..."
-socat TCP-LISTEN:5001,fork,reuseaddr TCP:localhost:80 &
-SOCAT_PID=$!
-
-# Create a script to modify server.js to include CORS headers
-cat > /tmp/add_cors.js << "EOF"
-const fs = require("fs");
-const serverPath = "/app/server/server.js";
-const content = fs.readFileSync(serverPath, "utf8");
-if (!content.includes("Access-Control-Allow-Credentials")) {
-  const corsConfig = `  origin: ["http://localhost", "http://localhost:80", "http://localhost:8080", "http://localhost:8081", "http://localhost:5001"],\n  credentials: true,\n  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],\n  allowedHeaders: ["Origin", "X-Requested-With", "Content-Type", "Accept", "Authorization", "user-id"]`;
-  const modifiedContent = content.replace("  origin: [", "  // Modified CORS config\n" + corsConfig + "\n  // Original config\n  // origin: [");
-  fs.writeFileSync(serverPath, modifiedContent);
-  console.log("Added CORS headers to server.js");
-} else {
-  console.log("CORS headers already exist in server.js");
-}
+# Create .env file
+log "Creating .env file..."
+cat > /app/.env << EOF
+VITE_API_URL=/api
+VITE_BASE_URL=http://localhost:${FRONTEND_PORT}
+DB_HOST=${DB_HOST}
+DB_USER=${DB_USER}
+DB_PASSWORD=${DB_PASSWORD}
+DB_NAME=${DB_NAME}
+FRONTEND_PORT=${FRONTEND_PORT}
+BACKEND_PORT=${BACKEND_PORT}
+BACKEND_URL=${BACKEND_URL}
 EOF
 
-# Run the script to add CORS headers
-node /tmp/add_cors.js
+# Copy .env to server directory
+cp /app/.env /app/server/.env
+log "Created .env file and copied to server directory"
 
-# Monitor and restart socat if it dies
-monitor_socat() {
-  while true; do
-    if ! kill -0 $SOCAT_PID 2>/dev/null; then
-      echo "Socat died, restarting..."
-      socat TCP-LISTEN:5001,fork,reuseaddr TCP:localhost:80 &
-      SOCAT_PID=$!
-    fi
-    sleep 5
-  done
+# Create server.js symlink if it doesn't exist
+if [ ! -f /app/server.js ]; then
+    log "Creating server.js symlink..."
+    ln -s /app/server/server.js /app/server.js
+fi
+
+# Start the backend server
+log "Starting backend server on port $BACKEND_PORT..."
+cd /app/server
+PORT=$BACKEND_PORT node server.js > /var/log/backend.log 2>&1 &
+BACKEND_PID=$!
+
+# Wait for backend to be ready
+log "Waiting for backend server to start..."
+sleep 5
+
+# Verify backend is running
+if ! kill -0 $BACKEND_PID 2>/dev/null; then
+    log "Error: Backend server failed to start"
+    cat /var/log/backend.log
+    exit 1
+fi
+
+log "Backend server is running with PID $BACKEND_PID"
+
+# Start the frontend server
+log "Starting frontend server on port $FRONTEND_PORT..."
+cd /app
+BACKEND_URL=$BACKEND_URL node frontend-server.js > /var/log/frontend.log 2>&1 &
+FRONTEND_PID=$!
+
+# Wait for frontend to be ready
+log "Waiting for frontend server to start..."
+sleep 5
+
+# Verify frontend is running
+if ! kill -0 $FRONTEND_PID 2>/dev/null; then
+    log "Error: Frontend server failed to start"
+    cat /var/log/frontend.log
+    exit 1
+fi
+
+log "Frontend server is running with PID $FRONTEND_PID"
+
+# Start socat for port redirection
+log "Setting up port redirection: port 5001 -> port $FRONTEND_PORT..."
+socat TCP-LISTEN:5001,fork,reuseaddr TCP:localhost:$FRONTEND_PORT > /var/log/socat.log 2>&1 &
+SOCAT_PID=$!
+
+# Verify socat is running
+if ! kill -0 $SOCAT_PID 2>/dev/null; then
+    log "Error: Port redirection failed to start"
+    cat /var/log/socat.log
+    exit 1
+fi
+
+log "Port redirection is running with PID $SOCAT_PID"
+
+# Monitor processes
+monitor_processes() {
+    while true; do
+        if ! kill -0 $BACKEND_PID 2>/dev/null; then
+            log "Backend server died. Logs:"
+            cat /var/log/backend.log
+            exit 1
+        fi
+        if ! kill -0 $FRONTEND_PID 2>/dev/null; then
+            log "Frontend server died. Logs:"
+            cat /var/log/frontend.log
+            exit 1
+        fi
+        if ! kill -0 $SOCAT_PID 2>/dev/null; then
+            log "Port redirection died. Logs:"
+            cat /var/log/socat.log
+            exit 1
+        fi
+        sleep 5
+    done
 }
 
 # Start monitoring in background
-monitor_socat &
+monitor_processes &
 MONITOR_PID=$!
 
-# Handle shutdown gracefully
-trap "kill $BACKEND_PID $FRONTEND_PID $SOCAT_PID $MONITOR_PID; exit" SIGINT SIGTERM
+# Handle shutdown
+trap "log 'Shutting down...'; kill $BACKEND_PID $FRONTEND_PID $SOCAT_PID $MONITOR_PID; exit" SIGTERM SIGINT
 
-# Wait for any process to exit
-wait -n
-
-# Exit with status of process that exited first
-exit $?
+# Keep the container running
+wait $MONITOR_PID
