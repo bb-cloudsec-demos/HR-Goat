@@ -36,7 +36,7 @@ RUN npm init -y && \
     http-proxy-middleware@2.0.6 \
     node-fetch@2.6.1 \
     cors@2.8.5 \
-    path-to-regexp@6.2.0
+    path-to-regexp@3.2.0
 
 # Copy frontend server file
 COPY frontend-server.js /app/frontend-server.js
